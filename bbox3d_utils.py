@@ -43,25 +43,38 @@ DEFAULT_DIMS = {
     'book': np.array([0.03, 0.20, 0.15]),
     'bottle': np.array([0.25, 0.10, 0.10]),
     'cup': np.array([0.10, 0.08, 0.08]),
-    'vase': np.array([0.30, 0.15, 0.15])
+    'vase': np.array([0.30, 0.15, 0.15]),
+    # Machining tools (height, diameter, diameter) in meters
+    'end_mill':    np.array([0.15, 0.02, 0.02]),
+    'drill_bit':   np.array([0.15, 0.015, 0.015]),
+    'tap':         np.array([0.10, 0.01, 0.01]),
+    'reamer':      np.array([0.12, 0.015, 0.015]),
+    'countersink': np.array([0.08, 0.02, 0.02]),
+    'boring_bar':  np.array([0.20, 0.02, 0.02]),
+    'tool':        np.array([0.12, 0.015, 0.015]),  # generic fallback
 }
 
 class BBox3DEstimator:
     """
     3D bounding box estimation from 2D detections and depth
     """
-    def __init__(self, camera_matrix=None, projection_matrix=None, class_dims=None):
+    def __init__(self, camera_matrix=None, projection_matrix=None, class_dims=None,
+                 depth_min=1.0, depth_max=10.0):
         """
         Initialize the 3D bounding box estimator
-        
+
         Args:
             camera_matrix (numpy.ndarray): Camera intrinsic matrix (3x3)
             projection_matrix (numpy.ndarray): Camera projection matrix (3x4)
             class_dims (dict): Dictionary mapping class names to dimensions (height, width, length)
+            depth_min (float): Minimum scene depth in metres (maps depth_value=0)
+            depth_max (float): Maximum scene depth in metres (maps depth_value=1)
         """
         self.K = camera_matrix if camera_matrix is not None else DEFAULT_K
         self.P = projection_matrix if projection_matrix is not None else DEFAULT_P
         self.dims = class_dims if class_dims is not None else DEFAULT_DIMS
+        self.depth_min = depth_min
+        self.depth_max = depth_max
         
         # Initialize Kalman filters for tracking 3D boxes
         self.kf_trackers = {}
@@ -116,9 +129,7 @@ class BBox3DEstimator:
             dimensions[1] = dimensions[0] * 0.3  # width
             dimensions[2] = dimensions[0] * 0.3  # length
         
-        # Convert depth to distance - use a larger range for better visualization
-        # Map depth_value (0-1) to a range of 1-10 meters
-        distance = 1.0 + depth_value * 9.0  # Increased from 4.0 to 9.0 for a larger range
+        distance = self.depth_min + depth_value * (self.depth_max - self.depth_min)
         
         # Calculate 3D location
         location = self._backproject_point(center_x, center_y, distance)
@@ -557,7 +568,14 @@ class BBox3DEstimator:
         if 'score' in box_3d:
             score = box_3d['score']
             score_text = f"S:{score:.2f}"
-            cv2.putText(image, score_text, (x1, text_y), 
+            cv2.putText(image, score_text, (x1, text_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            text_y -= 15
+
+        # Get height estimate if available
+        if 'estimated_height_cm' in box_3d:
+            h_cm = box_3d['estimated_height_cm']
+            cv2.putText(image, f"H:{h_cm} cm", (x1, text_y),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
         
         # Draw a vertical line from the bottom of the box to the ground
@@ -589,6 +607,23 @@ class BBox3DEstimator:
         for obj_id in list(self.box_history.keys()):
             if obj_id not in active_ids_set:
                 del self.box_history[obj_id]
+
+    def estimate_height_cm(self, bbox_2d, depth_value):
+        """
+        Estimate the real-world height of an object using the pinhole camera model.
+
+        Args:
+            bbox_2d (list): 2D bounding box [x1, y1, x2, y2]
+            depth_value (float): Normalised depth value (0–1)
+
+        Returns:
+            float: Estimated height in centimetres, rounded to 1 decimal place
+        """
+        height_px = bbox_2d[3] - bbox_2d[1]
+        distance_m = self.depth_min + depth_value * (self.depth_max - self.depth_min)
+        focal_length = self.K[1, 1]
+        height_m = (height_px / focal_length) * distance_m
+        return round(height_m * 100, 1)
 
 class BirdEyeView:
     """

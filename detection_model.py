@@ -7,7 +7,7 @@ from collections import deque
 
 class ObjectDetector:
     """
-    Object detection using YOLOv11 from Ultralytics
+    Object detection using YOLO26 from Ultralytics
     """
     def __init__(self, model_size='small', conf_thres=0.25, iou_thres=0.45, classes=None, device=None):
         """
@@ -40,11 +40,11 @@ class ObjectDetector:
         
         # Map model size to model name
         model_map = {
-            'nano': 'yolo11n',
-            'small': 'yolo11s',
-            'medium': 'yolo11m',
-            'large': 'yolo11l',
-            'extra': 'yolo11x'
+            'nano': 'yolo26n',
+            'small': 'yolo26s',
+            'medium': 'yolo26m',
+            'large': 'yolo26l',
+            'extra': 'yolo26x'
         }
         
         model_name = model_map.get(model_size.lower(), model_map['small'])
@@ -52,7 +52,7 @@ class ObjectDetector:
         # Load model
         try:
             self.model = YOLO(model_name)
-            print(f"Loaded YOLOv11 {model_size} model on {self.device}")
+            print(f"Loaded YOLO26 {model_size} model on {self.device}")
         except Exception as e:
             print(f"Error loading model: {e}")
             print("Trying to load with default settings...")

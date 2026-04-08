@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import csv
 import os
 import sys
 import time
@@ -13,6 +14,7 @@ if hasattr(torch, 'backends') and hasattr(torch.backends, 'mps') and torch.backe
 
 # Import our modules
 from detection_model import ObjectDetector
+from roboflow_model import RoboflowDetector
 from depth_model import DepthEstimator
 from bbox3d_utils import BBox3DEstimator, BirdEyeView
 from load_camera_params import load_camera_params, apply_camera_params_to_estimator
@@ -23,8 +25,8 @@ def main():
     # ===============================================
     
     # Input/Output
-    source = 0  # Path to input video file or webcam index (0 for default camera)
-    output_path = "output.mp4"  # Path to output video file
+    source = "test2.jpeg" # Path to input video file or webcam index (0 for default camera)
+    output_path = "output.jpeg"  # Path to output video file
     
     # Model settings
     yolo_model_size = "nano"  # YOLOv11 model size: "nano", "small", "medium", "large", "extra"
@@ -42,33 +44,56 @@ def main():
     enable_tracking = True  # Enable object tracking
     enable_bev = True  # Enable Bird's Eye View visualization
     enable_pseudo_3d = True  # Enable pseudo-3D visualization
-    
+
+    # Roboflow settings (set use_roboflow=True to use your custom tool model)
+    use_roboflow = True
+    roboflow_api_key = "uBQUwbuRddQGIP6cxHCo"
+    roboflow_model_id = "dekracoating/1"
+
+    # Export
+    export_csv_path = "detections.csv"     # Set to None to disable CSV export
+
     # Camera parameters - simplified approach
     camera_params_file = None  # Path to camera parameters file (None to use default parameters)
+
+    # Depth range — set to match the actual distance to your scene
+    depth_min_m = 0.3   # metres at depth_value=0 (closest objects)
+    depth_max_m = 2.0  # metres at depth_value=1 (farthest objects)
+    # Close-up shots (< 1 m): try depth_min_m=0.3, depth_max_m=2.0
+    # Mid-range table shots: try depth_min_m=1.0, depth_max_m=5.0
+
+    # Camera focal length in pixels (None = KITTI default 718.856 px)
+    # Estimate: focal_length_px = (image_width / 2) / tan(horizontal_fov_deg * pi / 360)
+    # Typical portrait smartphone at 1080 px wide ≈ 1000–1200 px
+    focal_length_px = 1100
     # ===============================================
     
     print(f"Using device: {device}")
     
     # Initialize models
     print("Initializing models...")
-    try:
-        detector = ObjectDetector(
-            model_size=yolo_model_size,
-            conf_thres=conf_threshold,
-            iou_thres=iou_threshold,
-            classes=classes,
-            device=device
-        )
-    except Exception as e:
-        print(f"Error initializing object detector: {e}")
-        print("Falling back to CPU for object detection")
-        detector = ObjectDetector(
-            model_size=yolo_model_size,
-            conf_thres=conf_threshold,
-            iou_thres=iou_threshold,
-            classes=classes,
-            device='cpu'
-        )
+    if use_roboflow:
+        print("Using Roboflow detector")
+        detector = RoboflowDetector(api_key=roboflow_api_key, model_id=roboflow_model_id)
+    else:
+        try:
+            detector = ObjectDetector(
+                model_size=yolo_model_size,
+                conf_thres=conf_threshold,
+                iou_thres=iou_threshold,
+                classes=classes,
+                device=device
+            )
+        except Exception as e:
+            print(f"Error initializing object detector: {e}")
+            print("Falling back to CPU for object detection")
+            detector = ObjectDetector(
+                model_size=yolo_model_size,
+                conf_thres=conf_threshold,
+                iou_thres=iou_threshold,
+                classes=classes,
+                device='cpu'
+            )
     
     try:
         depth_estimator = DepthEstimator(
@@ -85,13 +110,93 @@ def main():
     
     # Initialize 3D bounding box estimator with default parameters
     # Simplified approach - focus on 2D detection with depth information
-    bbox3d_estimator = BBox3DEstimator()
+    bbox3d_estimator = BBox3DEstimator(depth_min=depth_min_m, depth_max=depth_max_m)
     
     # Initialize Bird's Eye View if enabled
     if enable_bev:
         # Use a scale that works well for the 1-5 meter range
         bev = BirdEyeView(scale=60, size=(300, 300))  # Increased scale to spread objects out
     
+    # Open CSV export file (shared by both image and video paths)
+    csv_file = None
+    csv_writer = None
+    if export_csv_path:
+        csv_file = open(export_csv_path, "w", newline="")
+        csv_writer = csv.writer(csv_file)
+        csv_writer.writerow([
+            "frame", "timestamp", "class_name", "object_id", "confidence",
+            "x1", "y1", "x2", "y2", "depth_value", "distance_m", "estimated_height_cm"
+        ])
+
+    # --- Image mode ---
+    IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
+    if isinstance(source, str) and Path(source).suffix.lower() in IMAGE_EXTS:
+        print(f"Image mode: processing {source}")
+        frame = cv2.imread(source)
+        if frame is None:
+            print(f"Error: could not read image {source}")
+            return
+        height, width = frame.shape[:2]
+        if focal_length_px is not None:
+            bbox3d_estimator.K = np.array([
+                [focal_length_px, 0, width / 2],
+                [0, focal_length_px, height / 2],
+                [0, 0, 1]
+            ], dtype=np.float64)
+        original_frame = frame.copy()
+        detection_frame = frame.copy()
+
+        detection_frame, detections = detector.detect(detection_frame, track=False)
+        depth_map = depth_estimator.estimate_depth(original_frame)
+        depth_colored = depth_estimator.colorize_depth(depth_map)
+        result_frame = frame.copy()
+        if hasattr(detector, 'draw_masks'):
+            detector.draw_masks(result_frame)
+
+        for detection in detections:
+            try:
+                bbox, score, class_id, obj_id = detection
+                class_name = detector.get_class_names()[class_id]
+                if class_name.lower() in ['person', 'cat', 'dog']:
+                    cx, cy = int((bbox[0]+bbox[2])/2), int((bbox[1]+bbox[3])/2)
+                    depth_value = depth_estimator.get_depth_at_point(depth_map, cx, cy)
+                    depth_method = 'center'
+                else:
+                    depth_value = depth_estimator.get_depth_in_region(depth_map, bbox, method='median')
+                    depth_method = 'median'
+                estimated_height_cm = bbox3d_estimator.estimate_height_cm(bbox, depth_value)
+                distance_m = round(depth_min_m + depth_value * (depth_max_m - depth_min_m), 2)
+                box_3d = {
+                    'bbox_2d': bbox, 'depth_value': depth_value, 'depth_method': depth_method,
+                    'class_name': class_name, 'object_id': obj_id, 'score': score,
+                    'estimated_height_cm': estimated_height_cm,
+                }
+                if enable_pseudo_3d:
+                    color = (0, 255, 0)
+                    result_frame = bbox3d_estimator.draw_box_3d(result_frame, box_3d, color=color)
+                if csv_writer is not None:
+                    csv_writer.writerow([0, 0.0, class_name, obj_id, round(score, 4),
+                                         bbox[0], bbox[1], bbox[2], bbox[3],
+                                         round(depth_value, 4), distance_m, estimated_height_cm])
+            except Exception as e:
+                print(f"Error processing detection: {e}")
+
+        # Save result image
+        stem = Path(source).stem
+        out_image_path = f"{stem}_output.jpg"
+        cv2.imwrite(out_image_path, result_frame)
+        print(f"Result saved to {out_image_path}")
+        if export_csv_path and csv_file is not None:
+            csv_file.close()
+            print(f"Detections exported to {export_csv_path}")
+
+        cv2.imshow("3D Object Detection", result_frame)
+        cv2.imshow("Depth Map", depth_colored)
+        print("Press any key to close.")
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+        return
+
     # Open video source
     try:
         if isinstance(source, str) and source.isdigit():
@@ -113,6 +218,13 @@ def main():
     if fps == 0:  # Sometimes happens with webcams
         fps = 30
     
+    if focal_length_px is not None:
+        bbox3d_estimator.K = np.array([
+            [focal_length_px, 0, width / 2],
+            [0, focal_length_px, height / 2],
+            [0, 0, 1]
+        ], dtype=np.float64)
+
     # Initialize video writer
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
@@ -121,7 +233,7 @@ def main():
     frame_count = 0
     start_time = time.time()
     fps_display = "FPS: --"
-    
+
     print("Starting processing...")
     
     # Main loop
@@ -147,6 +259,8 @@ def main():
             # Step 1: Object Detection
             try:
                 detection_frame, detections = detector.detect(detection_frame, track=enable_tracking)
+                if hasattr(detector, 'draw_masks'):
+                    detector.draw_masks(result_frame)
             except Exception as e:
                 print(f"Error during object detection: {e}")
                 detections = []
@@ -189,6 +303,10 @@ def main():
                         depth_value = depth_estimator.get_depth_in_region(depth_map, bbox, method='median')
                         depth_method = 'median'
                     
+                    # Estimate physical height using pinhole camera model
+                    estimated_height_cm = bbox3d_estimator.estimate_height_cm(bbox, depth_value)
+                    distance_m = round(depth_min_m + depth_value * (depth_max_m - depth_min_m), 2)
+
                     # Create a simplified 3D box representation
                     box_3d = {
                         'bbox_2d': bbox,
@@ -196,10 +314,21 @@ def main():
                         'depth_method': depth_method,
                         'class_name': class_name,
                         'object_id': obj_id,
-                        'score': score
+                        'score': score,
+                        'estimated_height_cm': estimated_height_cm,
                     }
-                    
+
                     boxes_3d.append(box_3d)
+
+                    # Write to CSV
+                    if csv_writer is not None:
+                        timestamp = round(frame_count / max(fps, 1), 3)
+                        csv_writer.writerow([
+                            frame_count, timestamp, class_name, obj_id,
+                            round(score, 4),
+                            bbox[0], bbox[1], bbox[2], bbox[3],
+                            round(depth_value, 4), distance_m, estimated_height_cm
+                        ])
                     
                     # Keep track of active IDs for tracker cleanup
                     if obj_id is not None:
@@ -229,7 +358,8 @@ def main():
                         color = (255, 255, 255)  # White
                     
                     # Draw box with depth information
-                    result_frame = bbox3d_estimator.draw_box_3d(result_frame, box_3d, color=color)
+                    if enable_pseudo_3d:
+                        result_frame = bbox3d_estimator.draw_box_3d(result_frame, box_3d, color=color)
                 except Exception as e:
                     print(f"Error drawing box: {e}")
                     continue
@@ -321,8 +451,12 @@ def main():
     cap.release()
     out.release()
     cv2.destroyAllWindows()
-    
+    if csv_file is not None:
+        csv_file.close()
+
     print(f"Processing complete. Output saved to {output_path}")
+    if export_csv_path:
+        print(f"Detections exported to {export_csv_path}")
 
 if __name__ == "__main__":
     try:
