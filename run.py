@@ -6,7 +6,10 @@ import time
 import cv2
 import numpy as np
 import torch
+from dotenv import load_dotenv
 from pathlib import Path
+
+load_dotenv()
 
 # Set MPS fallback for operations not supported on Apple Silicon
 if hasattr(torch, 'backends') and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
@@ -17,7 +20,6 @@ from detection_model import ObjectDetector
 from roboflow_model import RoboflowDetector
 from depth_model import DepthEstimator
 from bbox3d_utils import BBox3DEstimator, BirdEyeView
-from load_camera_params import load_camera_params, apply_camera_params_to_estimator
 
 def main():
     """Main function."""
@@ -47,14 +49,11 @@ def main():
 
     # Roboflow settings (set use_roboflow=True to use your custom tool model)
     use_roboflow = True
-    roboflow_api_key = "uBQUwbuRddQGIP6cxHCo"
-    roboflow_model_id = "dekracoating/1"
+    roboflow_api_key = os.getenv("ROBOFLOW_API_KEY", "")
+    roboflow_model_id = os.getenv("ROBOFLOW_MODEL_ID", "dekracoating/1")
 
     # Export
     export_csv_path = "detections.csv"     # Set to None to disable CSV export
-
-    # Camera parameters - simplified approach
-    camera_params_file = None  # Path to camera parameters file (None to use default parameters)
 
     # Depth range — set to match the actual distance to your scene
     depth_min_m = 0.3   # metres at depth_value=0 (closest objects)
@@ -253,7 +252,6 @@ def main():
             # Make copies for different visualizations
             original_frame = frame.copy()
             detection_frame = frame.copy()
-            depth_frame = frame.copy()
             result_frame = frame.copy()
             
             # Step 1: Object Detection
@@ -381,9 +379,6 @@ def main():
                     if bev_height > 0 and bev_width > 0:
                         # Resize BEV image
                         bev_resized = cv2.resize(bev_image, (bev_width, bev_height))
-                        
-                        # Create a region of interest in the result frame
-                        roi = result_frame[height - bev_height:height, 0:bev_width]
                         
                         # Simple overlay - just copy the BEV image to the ROI
                         result_frame[height - bev_height:height, 0:bev_width] = bev_resized
